@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+
+#
+# xcjit v0.1
+#
+# A simple script to enable Just-In-Time compilation for an app on a target device using Xcode CLI tools.
+#
+
+
+if [ -z "$1" ] || [ -z "$2" ]; then
+    echo "Usage: $(basename "$0") '<device name>' '<app/process name>'"
+    echo
+    echo "Example: $(basename "$0") 'iPad Pro' 'UTM'"
+    exit 1
+fi
+
+if ! command -v xcrun &> /dev/null; then
+    echo "xcrun not found. Are Xcode CLI tools installed?"
+    exit 1
+fi
+
+if ! command -v lldb &> /dev/null; then
+    echo "lldb not found. Are Xcode CLI tools installed?"
+    exit 1
+fi
+
+
+
+# 0. Setup variables
+DEVICE_NAME=$1
+PROCESS_NAME=$2
+
+
+# 1. Attempt to find the device by name
+
+printf "Searching device '$DEVICE_NAME'...\n"
+
+DEVICE_ID=$(
+    printf "device list" | lldb | grep "$DEVICE_NAME" | egrep '[0-9A-F]{8}-([0-9A-F]{4}-){3}[0-9A-F]{12}' -o | head -n 1
+)
+
+if [ -z "$DEVICE_ID" ]; then
+    echo "Device '$DEVICE_NAME' not found"
+    exit 1
+fi
+
+printf "Device found: $DEVICE_ID\n\n"
+
+
+
+# 2. Check if the device is available and save its lock state
+
+LOCK_STATE="$(xcrun devicectl device info lockState --device "$DEVICE_ID" | egrep 'passcodeRequired: (true|false)' -o | egrep '(true|false)' -o)"
+if [ -z "$LOCK_STATE" ]; then
+    printf '\033[0;31m'
+    printf "Device unavailable.\n\n"
+    printf '\033[0m'
+    exit 1
+fi
+
+
+
+# 3. Check if the process is running. If not, launch it.
+
+printf "Searching process '$PROCESS_NAME'...\n"
+
+update_detected_process_name() {
+    DETECTED_PROCESS_NAME="$(xcrun devicectl device info processes --device "$DEVICE_ID" | grep ".app" | grep "$PROCESS_NAME" | head -n 1 | awk -F "/" '{print $NF}')"
+}
+update_detected_process_name
+
+if [ -z "$DETECTED_PROCESS_NAME" ]; then
+
+    ACTION="l"
+
+    if [[ ! $ACTION =~ ^[LlWw]$ ]]; then
+        printf '\r'
+        printf '\033[0;31m'
+        printf "Error: Invalid input '$ACTION'\n"
+        printf '\033[0m'
+        exit 1
+
+    elif [[ ! $ACTION =~ ^[Ll]$ ]]; then
+        while [ -z "$DETECTED_PROCESS_NAME" ]; do
+            printf "\rWaiting for process to start..."
+            sleep 1.5
+            printf "\r...                            "
+            update_detected_process_name
+            sleep 1.5
+        done
+        if [ -z "$DETECTED_PROCESS_NAME" ]; then
+            printf '\033[0;31m'
+            printf "\rError: Process not found!      \n"
+            printf '\033[0m'
+            exit 1
+        fi
+        printf "\n"
+
+    else
+        printf "\r"
+
+        printf "Process not found. Searching bundle ID...\n"
+        BUNDLE_ID="$(xcrun devicectl device info apps --device "$DEVICE_ID" | grep "$PROCESS_NAME" | egrep '([A-Za-z0-9]+\.)+[A-Za-z0-9]+' -o | head -n 1)"
+        printf "Bundle ID found: $BUNDLE_ID\n"
+
+        if [ -z "$BUNDLE_ID" ]; then
+            printf '\033[0;31m'
+            printf "Error: Bundle ID not found.\n"
+            printf '\033[0m'
+            exit 1
+        fi
+
+        if [ "$LOCK_STATE" == "true" ]; then
+            printf '\033[0;33m'
+            printf "Device is locked. Please unlock device..."
+            printf '\033[0m'
+        fi
+
+        LAUNCH="$(xcrun devicectl device process launch --device $DEVICE_ID --no-activate --start-stopped $BUNDLE_ID 2>&1)"
+        printf '\r                                             \r'
+        printf '\033[0;30m'
+        printf "$LAUNCH\n"
+        printf '\033[0m'
+    fi
+    update_detected_process_name
+fi
+
+PROCESS_NAME=$DETECTED_PROCESS_NAME
+if [ -z "$PROCESS_NAME" ]; then
+    printf '\033[0;31m'
+    printf "Error: Process not found!\n"
+    printf '\033[0m'
+    exit 1
+fi
+
+printf "Process found!\n\n"
+
+
+
+# 4. Provide a summary of the gathered details.
+
+printf '\033[0;33m'
+printf "====================== Summary ======================\n"
+printf '\033[0m'
+printf "Device ID:      $DEVICE_ID\n"
+if [ -n "$BUNDLE_ID" ]; then printf "Bundle ID:      $BUNDLE_ID\n"; fi
+printf "Process Name:   $DETECTED_PROCESS_NAME\n"
+printf '\033[0;33m'
+printf "=====================================================\n\n"
+printf '\033[0m'
+
+
+
+# 5. Enable JIT
+
+printf "Enabling JIT...\n\n"
+RESULT="$(printf "device select $DEVICE_ID\ndevice process attach --name $PROCESS_NAME" | lldb 2>&1)"
+
+if [[ $RESULT == *"specified device was not found"* ]]; then
+    printf "$RESULT\n\n"
+    printf '\033[0;31m'
+    printf "Failed to select device '$DEVICE_ID'\n"
+    printf '\033[0m'
+    exit 1
+fi
+
+if [[ $RESULT == *"Could not find process"* ]]; then
+    printf "$RESULT\n\n"
+    printf '\033[0;31m'
+    printf "Failed to attach to process '$PROCESS_NAME'\n"
+    printf '\033[0m'
+    exit 1
+fi
+
+printf '\033[0;30m'
+printf "$RESULT\n\n"
+printf '\033[0m'
+printf '\033[0;32m'
+printf "JIT enabled successfully\n"
+printf '\033[0m'
+
